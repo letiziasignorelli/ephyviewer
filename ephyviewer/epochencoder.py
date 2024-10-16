@@ -18,6 +18,7 @@ from .base import ViewerBase, Base_ParamController, MyViewBox, same_param_tree
 from .epochviewer import RectItem, DataGrabber
 from .datasource import WritableEpochSource
 
+from pyqtgraph import QtGui, QtCore
 
 default_params = [
     {'name': 'xsize', 'type': 'float', 'value': 3., 'step': 0.1},
@@ -242,7 +243,7 @@ class EpochEncoder(ViewerBase):
             but = QT.QPushButton(but_text)
             buts.append(but)
             range_group_box_layout.addWidget(but, i, 0)
-            spinbox = pg.SpinBox(value=float(i), decimals = 8, bounds = (-np.inf, np.inf),step = 0.05, siPrefix=False, int=False)
+            spinbox = pg.SpinBox(value=float(i)*2.5, decimals = 8, bounds = (-np.inf, np.inf),step = 0.05, siPrefix=False, int=False)
             if 'compactHeight' in spinbox.opts:  # pyqtgraph >= 0.11.0
                 spinbox.setOpts(compactHeight=False)
             range_group_box_layout.addWidget(spinbox, i, 1)
@@ -303,6 +304,30 @@ class EpochEncoder(ViewerBase):
         self.toggle_controls_visibility_button.setArrowType(QT.UpArrow)
 
         self.toolbar.addSeparator()
+        
+        # Previous and next state
+        self.previous_state = self.toolbar.addAction('< State', self.on_previous_state)
+        self.previous_state.setShortcut(QtGui.QKeySequence(QtCore.Qt.AltModifier + QtCore.Qt.Key_Left))
+        self.previous_state.setToolTip('Previous state with shortcut: Alt+left_arrow')
+        
+        self.next_state = self.toolbar.addAction('State >', self.on_next_state)
+        self.next_state.setShortcut(QtGui.QKeySequence(QtCore.Qt.AltModifier + QtCore.Qt.Key_Right))
+        self.next_state.setToolTip('Next state with shortcut: Alt+right_arrow')
+        
+        self.toolbar.addSeparator()
+        
+        # Previous and next states that need manual curation
+        self.previous_state = self.toolbar.addAction('< To curate', self.on_previous_state_to_curate)
+        self.previous_state.setShortcut(QtGui.QKeySequence(QtCore.Qt.ControlModifier + QtCore.Qt.Key_Left))
+        self.previous_state.setToolTip('Previous state with shortcut: Ctrl+left_arrow')
+        
+        self.next_state = self.toolbar.addAction('To curate >', self.on_next_state_to_curate)
+        self.next_state.setShortcut(QtGui.QKeySequence(QtCore.Qt.ControlModifier + QtCore.Qt.Key_Right))
+        self.next_state.setToolTip('Next state with shortcut: Ctrl+right_arrow')
+        
+        self.toolbar.addSeparator()
+        
+        # Other buttons
 
         self.save_action = self.toolbar.addAction('Save', self.on_save)
         self.save_action.setShortcut('Ctrl+s')  # automatically converted to Cmd+s on Mac
@@ -500,7 +525,12 @@ class EpochEncoder(ViewerBase):
             ind = self.source.possible_labels.index(label)
             color = self.by_label_params['label'+str(ind), 'color']
             color2 = QT.QColor(color)
-            color2.setAlpha(130)
+            if self.epoch_to_curate(ids[i]):
+                color.setAlpha(50)
+                color2.setAlpha(50)
+            else:
+                color2.setAlpha(130)
+                
             if self.params['view_mode']=='stacked':
                 ypos = n-ind-1
             else:
@@ -534,6 +564,11 @@ class EpochEncoder(ViewerBase):
             self.plot.getAxis('left').setTicks([])
 
         if self.range_group_box.isChecked():
+            current_region = self.region.getRegion()
+            region_width = current_region[1] - current_region[0]
+
+            self.region.setRegion((self.t, self.t + region_width))
+
             self.region.show()
         else:
             self.region.hide()
@@ -566,11 +601,12 @@ class EpochEncoder(ViewerBase):
 
         # create the new epoch
         self.source.add_epoch(t_start, duration, label)
+        
+        if (self.params['exclusive_mode'] and not modifier_used) or (not self.params['exclusive_mode'] and modifier_used):
+            self.source.merge_neighbors()
 
-        if not range_selection_is_enabled:
-            # advance time by a step
-            self.t += duration
-            self.time_changed.emit(self.t)
+        self.t += duration
+        self.time_changed.emit(self.t)
 
         self.append_history()
         self.refresh()
@@ -683,6 +719,9 @@ class EpochEncoder(ViewerBase):
         # create the new epoch
         self.source.add_epoch(t, duration, label)
 
+        if self.params['exclusive_mode']:
+            self.on_merge_neighbors()
+            
         self.append_history()
         self.refresh()
         self.refresh_table()
@@ -965,4 +1004,136 @@ class EpochEncoder(ViewerBase):
         self.source.split_epoch(ind, self.t)
         self.append_history()
         self.refresh()
-        self.refresh_table()
+        self.refresh_table()       
+        
+    def on_previous_state(self):
+        """
+        Seek to the previous label in the table that is different from the current one.
+        """
+        current_index = None
+        # Get the current index from the selected cell or the current time position
+        selected_ind = self.table_widget.selectedIndexes()
+        if len(selected_ind) != 0:
+            current_index = selected_ind[0].row()
+        else:
+            # Find the current index based on the current time in the epochs
+            for i, t in enumerate(self.source.ep_times):
+                if self.t <= t:
+                    current_index = i if i > 0 else 0
+                    break
+        
+        if current_index is None and t == self.source.ep_times[-1]:
+            current_index = i
+
+
+        current_label = self.source.ep_labels[current_index]
+        # Iterate over labels in reverse to find the previous different label
+        for i in reversed(range(current_index)):
+            if self.source.ep_labels[i] != current_label:
+                # A different label is found, seek to its time
+                self.on_seek_table(i)
+                break
+            
+    def on_next_state(self):
+        """
+        Seek to the next label in the table that is different from the current one.
+        """
+        current_index = None
+        # Get the current index from the selected cell or the current time position
+        selected_ind = self.table_widget.selectedIndexes()
+        if len(selected_ind) != 0:
+            current_index = selected_ind[0].row()
+        else:
+            # Find the current index based on current time in the epochs
+            for i, t in enumerate(self.source.ep_times):
+                if self.t < t:
+                    current_index = i-1 if i > 0 else 0
+                    break
+
+        if current_index is None or current_index >= len(self.source.ep_labels):
+            self.on_seek_table(len(self.source.ep_labels)-1)
+            return  # No selection or already at the last epoch
+
+        current_label = self.source.ep_labels[current_index]
+        # Iterate over the labels to find the next different label
+        for i in range(current_index + 1, len(self.source.ep_labels)):
+            if self.source.ep_labels[i] != current_label:
+                # A different label is found, seek to its time
+                self.on_seek_table(i)
+                break
+            
+    def epoch_to_curate(self, ep_id=None):
+        if ep_id is None:
+            return
+        
+        # Validate if ep_id exists in the mapping
+        if ep_id not in self.source.id_to_ind:
+            raise ValueError(f"Epoch ID {ep_id} not found.")
+        
+        ind = self.source.id_to_ind[ep_id]
+
+        if self.source.ep_durations[ind] <= 2.5:
+            return True
+        
+        elif (ind > 0 
+            and self.source.ep_labels[ind] == 'REM' 
+            and self.source.ep_labels[ind-1] == 'WAKE'):
+            return True
+        
+        else:
+            return False
+    
+    
+    def on_previous_state_to_curate(self):
+        """
+        Seek to the previous label in the table that is different from the current one.
+        """
+        current_index = None
+        selected_ind = self.table_widget.selectedIndexes()
+        
+        if len(selected_ind) != 0:
+            current_index = selected_ind[0].row()
+        else:
+            # Find the current epoch index based on the current time
+            current_index = 0
+            for i in range(len(self.source.ep_times)):
+                if self.t < self.source.ep_times[i + 1] if i + 1 < len(self.source.ep_times) else float('inf'):
+                    current_index = i
+                    break
+
+        if current_index is None:
+            return  # No valid current index found
+
+        # Iterate over labels in reverse to find the previous different label
+        for i in reversed(range(current_index)):
+            ep_id = self.source.ep_ids[i]
+            if self.epoch_to_curate(ep_id):
+                self.on_seek_table(i)
+                break
+
+    def on_next_state_to_curate(self):
+        """
+        Seek to the next label in the table that is different from the current one.
+        """
+        current_index = None
+        selected_ind = self.table_widget.selectedIndexes()
+        
+        if len(selected_ind) != 0:
+            current_index = selected_ind[0].row()
+        else:
+            # Find the current epoch index based on the current time
+            current_index = 0
+            for i in range(len(self.source.ep_times)):
+                if self.t < self.source.ep_times[i]:
+                    current_index = i - 1 if i > 0 else 0
+                    break
+
+            if current_index is None or current_index >= len(self.source.ep_labels) - 1:
+                return  # No selection or already at the last epoch
+
+        # Iterate over the labels to find the next different label
+        for i in range(current_index + 1, len(self.source.ep_labels)):
+            ep_id = self.source.ep_ids[i]
+            if self.epoch_to_curate(ep_id):
+                self.on_seek_table(i)
+                break
