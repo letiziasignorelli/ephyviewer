@@ -5,9 +5,11 @@
 import numpy as np
 import scipy.fftpack
 import scipy.signal
+from scipy.ndimage import gaussian_filter
 
 import matplotlib.cm
 import matplotlib.colors
+import scipy.stats
 
 from .myqt import QT
 import pyqtgraph as pg
@@ -38,13 +40,16 @@ default_params = [
                     {'name': 'f_stop', 'type': 'float', 'value': 90., 'step': 1.},
                     {'name': 'deltafreq', 'type': 'float', 'value': 3., 'step': 1., 'limits': [0.1, 1.e6]},
                     {'name': 'f0', 'type': 'float', 'value': 2.5, 'step': 0.1},
-                    {'name': 'normalisation', 'type': 'float', 'value': 0., 'step': 0.1},]}
+                    {'name': 'normalisation', 'type': 'float', 'value': 0., 'step': 0.1},
+                    {'name': 'smoothing_length', 'type': 'float', 'value': 0., 'step': 0.1},
+                    {'name': 'zscore', 'type': 'bool', 'value': False},]}
 
     ]
 
 default_by_channel_params = [
     {'name': 'visible', 'type': 'bool', 'value': True},
-    {'name': 'clim', 'type': 'float', 'value': .1},
+    {'name': 'clim_Max', 'type': 'float', 'value': 1, 'step': 0.1},
+    {'name': 'clim_min', 'type': 'float', 'value': 0, 'step': 0.1},
     ]
 
 
@@ -107,7 +112,7 @@ class TimeFreqViewer_ParamController(Base_MultiChannel_ParamController):
         self.viewer.by_channel_params.blockSignals(True)
 
         for i, p in enumerate(self.viewer.by_channel_params.children()):
-            p.param('clim').setValue(p.param('clim').value()*factor)
+            p.param('clim_Max').setValue(p.param('clim_Max').value()*factor)
 
         self.viewer.by_channel_params.blockSignals(False)
         self.some_clim_changed.emit()
@@ -118,17 +123,22 @@ class TimeFreqViewer_ParamController(Base_MultiChannel_ParamController):
 
         self.viewer.by_channel_params.blockSignals(True)
         maxs = []
+        mins = []
         visibles,  = np.nonzero(self.visible_channels)
         for chan in visibles:
             if chan in self.viewer.last_wt_maps.keys():
                 m = np.max(self.viewer.last_wt_maps[chan])
+                mi = np.min(self.viewer.last_wt_maps[chan])
                 if self.viewer.params['scale_mode'] == 'by_channel':
-                    self.viewer.by_channel_params['ch'+str(chan), 'clim'] = m
+                    self.viewer.by_channel_params['ch'+str(chan), 'clim_Max'] = m
+                    self.viewer.by_channel_params['ch'+str(chan), 'clim_min'] = mi
                 else:
                     maxs.append(m)
+                    mins.append(mi)
         if self.viewer.params['scale_mode'] == 'same_for_all' and len(maxs)>0:
             for chan in visibles:
-                self.viewer.by_channel_params['ch'+str(chan), 'clim'] = max(maxs)
+                self.viewer.by_channel_params['ch'+str(chan), 'clim_Max'] = max(maxs)
+                self.viewer.by_channel_params['ch'+str(chan), 'clim_min'] = min(mins)
 
         self.viewer.by_channel_params.blockSignals(False)
         self.some_clim_changed.emit()
@@ -160,6 +170,9 @@ class TimeFreqWorker(QT.QObject):
         filter_sos = worker_params['filter_sos']
         wavelet_fourrier = worker_params['wavelet_fourrier']
         plot_length = worker_params['plot_length']
+        smoothing_length = worker_params['smoothing_length']
+        zscore = worker_params['zscore']
+        sub_sample_rate = worker_params['sub_sample_rate']
 
         i_start = self.source.time_to_index(t_start)
         #~ print('ds_ratio', ds_ratio)
@@ -212,6 +225,17 @@ class TimeFreqWorker(QT.QObject):
         wt_tmp=scipy.fftpack.ifft(small_sig_f[:,np.newaxis]*wavelet_fourrier,axis=0)
         wt = scipy.fftpack.fftshift(wt_tmp,axes=[0])
         wt = np.abs(wt).astype('float32')
+        
+        wt = np.log10(wt)**2
+        
+        # smoothing        
+        sigma = smoothing_length * sub_sample_rate
+        wt = gaussian_filter(wt, sigma=[sigma, 0], mode='constant')
+        
+        # zscoring
+        if zscore:
+            wt = scipy.stats.zscore(wt, axis=1)
+        
         if left_pad>0:
             wt = wt[:-left_pad]
         wt_map = wt[:plot_length]
@@ -366,6 +390,8 @@ class TimeFreqViewer(BaseMultiChannelViewer):
 
         d['wavelet_fourrier'] = generate_wavelet_fourier(d['len_wavelet'], tfr_params['f_start'], tfr_params['f_stop'],
                             tfr_params['deltafreq'], d['sub_sample_rate'], tfr_params['f0'], tfr_params['normalisation'])
+        d['smoothing_length'] = tfr_params['smoothing_length']
+        d['zscore'] =  tfr_params['zscore']
 
         if d['downsample_ratio']>1:
             n = 8
@@ -419,8 +445,9 @@ class TimeFreqViewer(BaseMultiChannelViewer):
         #~ print(t_start, f_start,self.worker_params['wanted_size'], f_stop-f_start)
 
         #~ image.updateImage(wt_map)
-        clim = self.by_channel_params['ch{}'.format(chan), 'clim']
-        image.setImage(wt_map, lut=self.lut, levels=[0, clim])
+        clim_max = self.by_channel_params['ch{}'.format(chan), 'clim_Max']
+        clim_min = self.by_channel_params['ch{}'.format(chan), 'clim_min']
+        image.setImage(wt_map, lut=self.lut, levels=[clim_min, clim_max])
         image.setRect(QT.QRectF(t1, f_start,t2-t1, f_stop-f_start))
 
         #TODO
