@@ -152,6 +152,22 @@ def make_fake_spiketrain_source():
     source = ephyviewer.InMemorySpikeSource(all_spikes=all_spikes)
     return source
 
+def make_fake_spectrogram():
+    # Parameters for the fake spectrogram
+    num_freqs = 50
+    num_time_samples = 200
+    num_channels = 2
+    sample_rate = 100.0
+    t_start = 0.0
+
+    # Create random spectrogram data (freqs x time x channels)
+    spectrogram = np.random.rand(num_freqs, num_time_samples, num_channels)
+
+    # Frequency array (for example)
+    frequencies = np.linspace(0.1, 100.0, num=num_freqs)
+
+    return spectrogram, frequencies, sample_rate, t_start
+
 
 def get_tdt_test_files():
     # this implementation is based on datalad which is buggy on GH actions

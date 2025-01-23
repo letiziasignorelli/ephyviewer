@@ -15,7 +15,7 @@ from .myqt import QT
 import pyqtgraph as pg
 
 from .base import BaseMultiChannelViewer, Base_MultiChannel_ParamController, MyViewBox
-from .datasource import InMemoryAnalogSignalSource
+from .datasource import InMemoryAnalogSignalSource, InMemoryTimeFreqSource
 
 from .tools import create_plot_grid
 
@@ -164,97 +164,137 @@ class TimeFreqWorker(QT.QObject):
             print('viewer has moved already', chan, self.viewer.t, t)
             # viewer has moved already
             return
-
-        ds_ratio = worker_params['downsample_ratio']
+        
+        # Common parameters
         sig_chunk_size = worker_params['sig_chunk_size']
-        filter_sos = worker_params['filter_sos']
-        wavelet_fourrier = worker_params['wavelet_fourrier']
-        plot_length = worker_params['plot_length']
-        smoothing_length = worker_params['smoothing_length']
         zscore = worker_params['zscore']
-        sub_sample_rate = worker_params['sub_sample_rate']
+        plot_length = worker_params['plot_length']
+        
+        if isinstance(self.source, InMemoryTimeFreqSource):
+            
+            i_start = self.source.time_to_index(t_start)
+            i_start = max(0, i_start)
+            i_start = min(i_start, self.source.get_sample_length())
+            
+            i_stop = i_start + sig_chunk_size
+            i_stop = min(i_stop, self.source.get_sample_length())
+            
+            sigs_chunk = self.source.get_chunk(i_start=i_start, i_stop=i_stop)
+            
+            f_start = worker_params['f_start']
+            f_stop = worker_params['f_stop']
+            frequencies = self.source.frequencies
+            freq_mask = (frequencies >= f_start) & (frequencies <= f_stop)
+            
+            if np.any(freq_mask):
+                wt = sigs_chunk[freq_mask, :, chan]
+                
+            else:
+                print("No frequencies fall in the given range, reverting to full range.")
+                wt = sigs_chunk[:, :, chan]
 
-        i_start = self.source.time_to_index(t_start)
-        #~ print('ds_ratio', ds_ratio)
-        #~ print('start', t_start, i_start)
+            # zscoring
+            if zscore:
+                wt = scipy.stats.zscore(wt, axis=1)
 
-        if ds_ratio>1:
-            i_start = i_start - (i_start%ds_ratio)
+            wt_map = wt[:, :plot_length].T      # Transpose for plotting reason in on_data_ready()
+            t1 = self.source.index_to_time(i_start)
+            t2 = self.source.index_to_time(i_start+wt_map.shape[0])
+            
+            self.data_ready.emit(chan, t, t_start, t_stop, t1, t2, wt_map)
+            
+        else:
+
+            ds_ratio = worker_params['downsample_ratio']
+            filter_sos = worker_params['filter_sos']
+            wavelet_fourrier = worker_params['wavelet_fourrier']
+            smoothing_length = worker_params['smoothing_length']
+            sub_sample_rate = worker_params['sub_sample_rate']
+
+            i_start = self.source.time_to_index(t_start)
+            #~ print('ds_ratio', ds_ratio)
             #~ print('start', t_start, i_start)
 
-        #clip it
-        i_start = max(0, i_start)
-        i_start = min(i_start, self.source.get_length())
-        if ds_ratio>1:
-            #after clip
-            i_start = i_start - (i_start%ds_ratio)
-        #~ print('start', t_start, i_start)
+            if ds_ratio>1:
+                i_start = i_start - (i_start%ds_ratio)
+                #~ print('start', t_start, i_start)
 
-        i_stop = i_start + sig_chunk_size
-        i_stop = min(i_stop, self.source.get_length())
+            #clip it
+            i_start = max(0, i_start)
+            i_start = min(i_start, self.source.get_length())
+            if ds_ratio>1:
+                #after clip
+                i_start = i_start - (i_start%ds_ratio)
+            #~ print('start', t_start, i_start)
 
-
-        sigs_chunk = self.source.get_chunk(i_start=i_start, i_stop=i_stop)
-        sig = sigs_chunk[:, chan]
-
-        if ds_ratio>1:
-            small_sig = scipy.signal.sosfiltfilt(filter_sos, sig)
-            small_sig =small_sig[::ds_ratio].copy()  # to ensure continuity
-        else:
-            small_sig = sig.copy()# to ensure continuity
-
-        left_pad = 0
-        if small_sig.shape[0] != wavelet_fourrier.shape[0]:
-            #Pad it
-            z = np.zeros(wavelet_fourrier.shape[0], dtype=small_sig.dtype)
-            left_pad = wavelet_fourrier.shape[0] - small_sig.shape[0]
-            z[:small_sig.shape[0]] = small_sig
-            small_sig = z
+            i_stop = i_start + sig_chunk_size
+            i_stop = min(i_stop, self.source.get_length())
 
 
-        #avoid border effect
-        small_sig -= small_sig.mean()
+            sigs_chunk = self.source.get_chunk(i_start=i_start, i_stop=i_stop)
+            sig = sigs_chunk[:, chan]
 
-        #~ print('sig', sig.shape, 'small_sig', small_sig.shape)
+            if ds_ratio>1:
+                small_sig = scipy.signal.sosfiltfilt(filter_sos, sig)
+                small_sig =small_sig[::ds_ratio].copy()  # to ensure continuity
+            else:
+                small_sig = sig.copy()# to ensure continuity
 
-        small_sig_f = scipy.fftpack.fft(small_sig)
-        if small_sig_f.shape[0] != wavelet_fourrier.shape[0]:
-            print('oulala', small_sig_f.shape, wavelet_fourrier.shape)
-            #TODO pad with zeros somewhere
-            return
-        wt_tmp=scipy.fftpack.ifft(small_sig_f[:,np.newaxis]*wavelet_fourrier,axis=0)
-        wt = scipy.fftpack.fftshift(wt_tmp,axes=[0])
-        wt = np.abs(wt).astype('float32')
-        
-        wt = np.log10(wt)**2
-        
-        # smoothing        
-        sigma = smoothing_length * sub_sample_rate
-        wt = gaussian_filter(wt, sigma=[sigma, 0], mode='constant')
-        
-        # zscoring
-        if zscore:
-            wt = scipy.stats.zscore(wt, axis=1)
-        
-        if left_pad>0:
-            wt = wt[:-left_pad]
-        wt_map = wt[:plot_length]
-        #~ wt_map =wt
-        #~ print('wt_map', wt_map.shape)
+            left_pad = 0
+            if small_sig.shape[0] != wavelet_fourrier.shape[0]:
+                #Pad it
+                z = np.zeros(wavelet_fourrier.shape[0], dtype=small_sig.dtype)
+                left_pad = wavelet_fourrier.shape[0] - small_sig.shape[0]
+                z[:small_sig.shape[0]] = small_sig
+                small_sig = z
 
 
-        #~ print('sleep', chan)
-        #~ time.sleep(2.)
+            #avoid border effect
+            small_sig -= small_sig.mean()
 
-        #TODO t_start and t_stop wrong
-        #~ print('sub_sample_rate', worker_params['sub_sample_rate'])
-        #~ print('wanted_size', worker_params['wanted_size'])
-        #~ print('plot_length', plot_length)
-        #~ print(i_start, i_stop)
-        t1 = self.source.index_to_time(i_start)
-        t2 = self.source.index_to_time(i_start+wt_map.shape[0]*ds_ratio)
-        #~ t2 = self.source.index_to_time(i_stop)
-        self.data_ready.emit(chan, t,   t_start, t_stop, t1, t2, wt_map)
+            #~ print('sig', sig.shape, 'small_sig', small_sig.shape)
+
+            small_sig_f = scipy.fftpack.fft(small_sig)
+            if small_sig_f.shape[0] != wavelet_fourrier.shape[0]:
+                print('oulala', small_sig_f.shape, wavelet_fourrier.shape)
+                #TODO pad with zeros somewhere
+                return
+            wt_tmp=scipy.fftpack.ifft(small_sig_f[:,np.newaxis]*wavelet_fourrier,axis=0)
+            wt = scipy.fftpack.fftshift(wt_tmp,axes=[0])
+            wt = np.abs(wt).astype('float32')
+            
+            wt = np.log10(wt)**2
+            
+            # smoothing        
+            sigma = smoothing_length * sub_sample_rate
+            wt = gaussian_filter(wt, sigma=[sigma, 0], mode='constant')
+            
+            # zscoring
+            if zscore:
+                wt = scipy.stats.zscore(wt, axis=1)
+            
+            if left_pad>0:
+                wt = wt[:-left_pad]
+            wt_map = wt[:plot_length]
+            #~ wt_map =wt
+            #~ print('wt_map', wt_map.shape)
+            
+            print(i_start)
+            print(i_stop)
+            print(sig_chunk_size)
+
+            #~ print('sleep', chan)
+            #~ time.sleep(2.)
+
+            #TODO t_start and t_stop wrong
+            #~ print('sub_sample_rate', worker_params['sub_sample_rate'])
+            #~ print('wanted_size', worker_params['wanted_size'])
+            #~ print('plot_length', plot_length)
+            #~ print(i_start, i_stop)
+            t1 = self.source.index_to_time(i_start)
+            t2 = self.source.index_to_time(i_start+wt_map.shape[0]*ds_ratio)
+            #~ t2 = self.source.index_to_time(i_stop)
+            self.data_ready.emit(chan, t,   t_start, t_stop, t1, t2, wt_map)
 
 
 class TimeFreqViewer(BaseMultiChannelViewer):
@@ -304,12 +344,47 @@ class TimeFreqViewer(BaseMultiChannelViewer):
             self.request_data.connect(worker.on_request_data)
 
         self.params.param('xsize').setLimits((0, np.inf))
-
+    
     @classmethod
-    def from_numpy(cls, sigs, sample_rate, t_start, name, channel_names=None):
-        source = InMemoryAnalogSignalSource(sigs, sample_rate, t_start, channel_names=channel_names)
+    def from_numpy(cls, sigs, sample_rate, t_start, name, channel_names=None, frequencies=None):
+        """
+        Initialize a TimeFreqViewer from a NumPy array which can be either
+        a time-domain signal or a precomputed spectrogram.
+
+        Parameters:
+        - sigs: np.ndarray
+            Can be a 2D time signal (time x channels) or a 3D spectrogram (freqs x time x channels).
+        - sample_rate: float
+            The sample rate of the data.
+        - t_start: float
+            The starting time for the data.
+        - name: str
+            The name to assign to the viewer.
+        - channel_names: list of str, optional
+            Names for each channel.
+        - frequencies: np.ndarray, optional
+            Frequencies for each row of a spectrogram (required if data is 3D).
+        """
+        if sigs.ndim == 2:
+            # Assuming it's a time-domain signal
+            source = InMemoryAnalogSignalSource(sigs, sample_rate, t_start, channel_names=channel_names)
+        elif sigs.ndim == 3:
+            # Assuming it's a spectrogram
+            if frequencies is None:
+                raise ValueError("Frequencies must be provided for spectrogram data.")
+            
+            # Check if frequencies match the first dimension of the spectrogram
+            if sigs.shape[0] != len(frequencies):
+                raise ValueError("Frequencies length must match the first dimension of the spectrogram.")
+            
+            source = InMemoryTimeFreqSource(sigs, frequencies, sample_rate, t_start, channel_names=channel_names)
+        else:
+            raise ValueError("Unsupported data shape. Expected 2D time-domain signals or 3D spectrograms.")
+
+        # Create the viewer with the chosen source
         view = cls(source=source, name=name)
         return view
+
 
     def closeEvent(self, event):
         for i, thread in enumerate(self.threads):
@@ -368,37 +443,56 @@ class TimeFreqViewer(BaseMultiChannelViewer):
                 self.vlines.append(None)
 
     def initialize_time_freq(self):
+        # Extract general parameters
         tfr_params = self.params.param('timefreq')
         sample_rate = self.source.sample_rate
+        
+        print('sample rate:' + str(sample_rate))
 
-        # we take sample_rate = f_stop*4 or (original sample_rate)
-        if tfr_params['f_stop']*4 < sample_rate:
-            wanted_sub_sample_rate = tfr_params['f_stop']*4
-        else:
-            wanted_sub_sample_rate = sample_rate
+        # Determine sub_sample_rate depending on the type of source
+        if isinstance(self.source, InMemoryAnalogSignalSource):
+            # Compute wanted_sub_sample_rate based on frequency stop if needed
+            if tfr_params['f_stop'] * 4 < sample_rate:
+                wanted_sub_sample_rate = tfr_params['f_stop'] * 4
+            else:
+                wanted_sub_sample_rate = sample_rate
 
-        # this try to find the best size to get a timefreq of 2**N by changing
-        # the sub_sample_rate and the sig_chunk_size
+        # Initialize worker parameters
         d = self.worker_params = {}
+        
+        # Common parameters for both source types
         d['wanted_size'] = self.params['xsize']
-        l = d['len_wavelet'] = int(2**np.ceil(np.log(d['wanted_size']*wanted_sub_sample_rate)/np.log(2)))
-        d['sig_chunk_size'] = d['wanted_size']*self.source.sample_rate
-        d['downsample_ratio'] = int(np.ceil(d['sig_chunk_size']/l))
-        d['sig_chunk_size'] = d['downsample_ratio']*l
-        d['sub_sample_rate'] = self.source.sample_rate/d['downsample_ratio']
-        d['plot_length'] = int(d['wanted_size']*d['sub_sample_rate'])
+        d['zscore'] = tfr_params['zscore']
 
-        d['wavelet_fourrier'] = generate_wavelet_fourier(d['len_wavelet'], tfr_params['f_start'], tfr_params['f_stop'],
-                            tfr_params['deltafreq'], d['sub_sample_rate'], tfr_params['f0'], tfr_params['normalisation'])
-        d['smoothing_length'] = tfr_params['smoothing_length']
-        d['zscore'] =  tfr_params['zscore']
-
-        if d['downsample_ratio']>1:
-            n = 8
-            q = d['downsample_ratio']
-            d['filter_sos'] = scipy.signal.cheby1(n, 0.05, 0.8 / q, output='sos')
+        if isinstance(self.source, InMemoryTimeFreqSource):
+            # Calculate parameters specifically for precomputed spectrograms
+            d['sig_chunk_size'] = int(d['wanted_size'] * self.source.sample_rate)
+            d['plot_length'] = int(d['wanted_size'] * self.source.sample_rate)
+            d['f_start'] = tfr_params['f_start']
+            d['f_stop'] = tfr_params['f_stop']
+            
         else:
-            d['filter_sos'] = None
+            # Existing logic for wavelet-based spectrogram computation
+            l = d['len_wavelet'] = int(2**np.ceil(np.log(d['wanted_size'] * wanted_sub_sample_rate) / np.log(2)))
+            d['sig_chunk_size'] = d['wanted_size'] * self.source.sample_rate
+            d['downsample_ratio'] = int(np.ceil(d['sig_chunk_size'] / l))
+            d['sig_chunk_size'] = d['downsample_ratio'] * l
+            d['sub_sample_rate'] = self.source.sample_rate / d['downsample_ratio']
+            d['plot_length'] = int(d['wanted_size'] * d['sub_sample_rate'])
+
+            # Wavelet generation and additional parameters
+            d['wavelet_fourrier'] = generate_wavelet_fourier(
+                d['len_wavelet'], tfr_params['f_start'], tfr_params['f_stop'],
+                tfr_params['deltafreq'], d['sub_sample_rate'], tfr_params['f0'], tfr_params['normalisation'])
+            d['smoothing_length'] = tfr_params['smoothing_length']
+
+            if d['downsample_ratio'] > 1:
+                n = 8
+                q = d['downsample_ratio']
+                d['filter_sos'] = scipy.signal.cheby1(n, 0.05, 0.8 / q, output='sos')
+            else:
+                d['filter_sos'] = None
+
 
     def change_color_scale(self):
         N = 512

@@ -6,4 +6,5 @@ from .epochs import *
 from .spikes import *
 from .neosource import *
 from .spikeinterfacesources import *
+from .timefreqsources import *
 

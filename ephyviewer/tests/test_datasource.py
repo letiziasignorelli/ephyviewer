@@ -171,6 +171,35 @@ def test_spikeinterface_sources():
     print(source.t_start, source.nb_channel, source.get_channel_name())
 
 
+def test_InMemoryTimeFreqSource():
+    # Create a mock spectrogram 3D array with dimensions (freq x time x channel)
+    num_frequencies = 10
+    num_samples = 100
+    num_channels = 1  # Single channel case
+    spectrogram = np.random.randn(num_frequencies, num_samples, num_channels)
+
+    # Create frequencies array matching the number of frequency bins
+    frequencies = np.linspace(0.1, 10.0, num=num_frequencies)
+
+    # Define sample rate and start time
+    sample_rate = 100.0
+    t_start = 0.0
+
+    # Create the source
+    source = ephyviewer.InMemoryTimeFreqSource(spectrogram, frequencies, sample_rate, t_start)
+
+    # Assertions to validate the source properties and methods
+    assert source.nb_channel == num_channels
+    assert source.get_freq_length() == num_frequencies
+    assert source.get_sample_length() == num_samples
+    assert np.array_equal(source.frequencies, frequencies)
+    assert source.get_shape() == (num_frequencies, num_samples, num_channels)
+    assert np.all(source.get_chunk(i_start=5, i_stop=10) == spectrogram[5:10, :, :])
+
+    # Check t_start and t_stop
+    assert source.t_start == t_start
+    assert source.t_stop == (num_samples / sample_rate) + t_start
+
 
 
 if __name__=='__main__':
@@ -182,3 +211,4 @@ if __name__=='__main__':
     test_neo_rawio_sources()
     test_neo_object_sources()
     test_spikeinterface_sources()
+    test_InMemoryTimeFreqSource()
