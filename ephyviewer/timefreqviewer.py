@@ -195,6 +195,9 @@ class TimeFreqWorker(QT.QObject):
 
 
         sigs_chunk = self.source.get_chunk(i_start=i_start, i_stop=i_stop)
+        if sigs_chunk.dtype!='float32':
+            sigs_chunk = sigs_chunk.astype('float32')
+            
         sig = sigs_chunk[:, chan]
 
         if ds_ratio>1:
